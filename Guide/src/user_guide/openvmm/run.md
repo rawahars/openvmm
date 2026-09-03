@@ -143,6 +143,14 @@ parser. On Windows, `.vhdx` files use the native kernel-mode VHD path
 instead. Fixed VHD1 images work on all platforms. Dynamic and differencing VHD1
 files are **not** supported — convert them to VHDX first:
 
+OpenVMM also supports read-only `.vmdk` descriptor files with
+`createType="monolithicFlat"` or `createType="twoGbMaxExtentFlat"` and up to 64
+regular-file `FLAT` sources. Sparse, parent-backed, writable, and direct-I/O
+VMDK disks are not supported. Multi-process startup configurations share the
+64-file mesh transport budget with other file-backed resources; a descriptor
+using all 64 sources must be hot-plugged after startup or used in single-process
+mode.
+
 ```bash
 qemu-img convert -f vpc -O vhdx dynamic.vhd converted.vhdx
 ```
