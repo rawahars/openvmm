@@ -1,0 +1,149 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+name: Fork OpenVMM Dev Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit to package
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.source_ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Build Linux x64 dev package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: 0
+      REQUESTED_REF: ${{ inputs.source_ref }}
+      TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Check out requested revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_ref }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            libssl-dev \
+            linux-libc-dev \
+            pkg-config
+
+      - name: Install Rust
+        run: |
+          curl --fail --proto '=https' --tlsv1.2 --silent --show-error \
+            https://sh.rustup.rs |
+            sh -s -- --default-toolchain 1.95.0 --profile minimal --yes
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add "$TARGET"
+
+      - name: Restore OpenVMM build packages
+        run: cargo xflowey restore-packages
+
+      - name: Test VMDK backend
+        run: cargo test --locked --package disk_vmdk
+
+      - name: Build OpenVMM
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            --package openvmm \
+            --target "$TARGET"
+
+      - name: Assemble dev package
+        id: package
+        run: |
+          set -euo pipefail
+
+          source_commit="$(git rev-parse HEAD)"
+          commit="${source_commit:0:12}"
+          drop_name="openvmm-dev-${commit}-linux-x64"
+          drop_dir="$GITHUB_WORKSPACE/out/$drop_name"
+          binary="$GITHUB_WORKSPACE/target/$TARGET/release/openvmm"
+
+          mkdir -p "$drop_dir/bin" "$drop_dir/debug"
+          install -m 0755 "$binary" "$drop_dir/bin/openvmm"
+          install -m 0644 LICENSE "$drop_dir/LICENSE"
+
+          objcopy --only-keep-debug \
+            "$drop_dir/bin/openvmm" \
+            "$drop_dir/debug/openvmm.dbg"
+          strip --strip-debug "$drop_dir/bin/openvmm"
+          objcopy \
+            --add-gnu-debuglink="$drop_dir/debug/openvmm.dbg" \
+            "$drop_dir/bin/openvmm"
+
+          {
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "commit=$source_commit"
+            echo "requested_ref=$REQUESTED_REF"
+            echo "target=$TARGET"
+            echo "workflow_run=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            rustc -Vv
+            cargo -V
+            echo
+            "$drop_dir/bin/openvmm" --version
+            echo
+            ldd "$drop_dir/bin/openvmm" || true
+          } > "$drop_dir/BUILD-INFO.txt"
+
+          cat > "$drop_dir/README.txt" <<'EOF'
+          OpenVMM Linux x64 development package
+
+          Install:
+            sudo install -m 0755 bin/openvmm /usr/local/bin/openvmm
+
+          Verify:
+            /usr/local/bin/openvmm --version
+            ldd /usr/local/bin/openvmm
+
+          Runtime notes:
+            - KVM use requires access to /dev/kvm.
+            - UEFI boot requires an MSVM.fd firmware path supplied to --uefi.
+            - The debug/openvmm.dbg file is optional and is not installed.
+          EOF
+
+          (
+            cd "$drop_dir"
+            find . -type f ! -name SHA256SUMS -print0 |
+              sort -z |
+              xargs -0 sha256sum > SHA256SUMS
+          )
+
+          tar -C "$GITHUB_WORKSPACE/out" \
+            -czf "$GITHUB_WORKSPACE/out/$drop_name.tar.gz" \
+            "$drop_name"
+          (
+            cd "$GITHUB_WORKSPACE/out"
+            sha256sum "$drop_name.tar.gz" > "$drop_name.tar.gz.sha256"
+          )
+
+          echo "drop_name=$drop_name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dev package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.package.outputs.drop_name }}
+          path: |
+            out/${{ steps.package.outputs.drop_name }}.tar.gz
+            out/${{ steps.package.outputs.drop_name }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
